@@ -38,12 +38,15 @@ class SmoothedValue(object):
         """
         Warning: does not synchronize the deque!
         """
+        
         if not is_dist_avail_and_initialized():
             return
+        
         t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
         dist.barrier()
         dist.all_reduce(t)
         t = t.tolist()
+        
         self.count = int(t[0])
         self.total = t[1]
 
@@ -103,9 +106,8 @@ class MetricLogger(object):
     def __str__(self):
         loss_str = []
         for name, meter in self.meters.items():
-            loss_str.append(
-                "{}: {}".format(name, str(meter))
-            )
+            loss_str.append(f"{name}: {meter}")
+            
         return self.delimiter.join(loss_str)
 
     def synchronize_between_processes(self):
@@ -290,13 +292,16 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
 def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     decay = []
     no_decay = []
+    
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue  # frozen weights
+        
         if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list or 'diffloss' in name:
             no_decay.append(param)  # no weight decay on bias, norm and diffloss
         else:
             decay.append(param)
+            
     return [
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay}]

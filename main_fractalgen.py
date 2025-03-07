@@ -21,6 +21,7 @@ from engine_fractalgen import train_one_epoch, compute_nll, evaluate
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Fractal Generative Models', add_help=False)
+    
     parser.add_argument('--batch_size', default=64, type=int,
                         help='Batch size per GPU (effective batch size = batch_size * # GPUs)')
     parser.add_argument('--epochs', default=400, type=int)
@@ -119,6 +120,7 @@ def get_args_parser():
 
 
 def main(args):
+    # Distributed training setup
     misc.init_distributed_mode(args)
     print('Job directory:', os.path.dirname(os.path.realpath(__file__)))
     print("Arguments:\n{}".format(args).replace(', ', ',\n'))
@@ -155,9 +157,11 @@ def main(args):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
+    # Dataset setup
     dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
     dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
 
+    # Dataloader setup
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
     )
@@ -189,13 +193,14 @@ def main(args):
         r_weight=args.r_weight,
         grad_checkpointing=args.grad_checkpointing
     )
-
     print("Model =", model)
+    
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Number of trainable parameters: {:.2f}M".format(n_params / 1e6))
 
     model.to(device)
 
+    # Learning rate & batch size
     eff_batch_size = args.batch_size * misc.get_world_size()
     if args.lr is None:  # only base_lr (blr) is specified
         args.lr = args.blr * eff_batch_size / 256
@@ -211,6 +216,7 @@ def main(args):
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
+    
     loss_scaler = NativeScaler()
 
     # Resume from checkpoint if provided
@@ -225,7 +231,9 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
+                
             print("Loaded optimizer & scaler state!")
+            
         del checkpoint
     else:
         print("Training from scratch")
@@ -234,11 +242,13 @@ def main(args):
     if args.evaluate_gen:
         torch.cuda.empty_cache()
         evaluate(model_without_ddp, args, 0, batch_size=args.gen_bsz, log_writer=log_writer)
+        
         return
 
     if args.evaluate_nll:
         torch.cuda.empty_cache()
         compute_nll(model, data_loader_val, device, N=args.nll_forward_number)
+        
         return
 
     # Training loop
@@ -249,7 +259,8 @@ def main(args):
             data_loader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(
-            model, data_loader_train, optimizer, device, epoch, loss_scaler, log_writer=log_writer, args=args
+            model, data_loader_train, optimizer, 
+            device, epoch, loss_scaler, log_writer=log_writer, args=args
         )
 
         # Save checkpoint periodically

@@ -18,6 +18,7 @@ import torch_fidelity
 def train_one_epoch(model, data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, log_writer=None, args=None):
     model.train(True)
+    
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -26,22 +27,23 @@ def train_one_epoch(model, data_loader: Iterable, optimizer: torch.optim.Optimiz
     optimizer.zero_grad()
 
     if log_writer is not None:
-        print('log_dir: {}'.format(log_writer.log_dir))
+        print(f'log_dir: {log_writer.log_dir}')
 
     for data_iter_step, (samples, labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        # per iteration (instead of per epoch) lr scheduler
+        # Per iteration (instead of per epoch) lr scheduler
         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         samples = samples.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # forward
-        with torch.cuda.amp.autocast():
+        # Forward
+        # with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device.type):
             loss = model(samples, labels)
 
         loss_value = loss.item()
         if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
+            print(f"Loss is {loss_value}, stopping training")
             sys.exit(1)
 
         loss_scaler(loss, optimizer, clip_grad=args.grad_clip, parameters=model.parameters(), update_grad=True)
@@ -63,11 +65,13 @@ def train_one_epoch(model, data_loader: Iterable, optimizer: torch.optim.Optimiz
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
+    
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 def compute_nll(model: torch.nn.Module, data_loader: Iterable, device: torch.device, N: int):
     model.eval()
+    
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = ''
     print_freq = 20
@@ -75,21 +79,22 @@ def compute_nll(model: torch.nn.Module, data_loader: Iterable, device: torch.dev
     total_samples = 0
     total_bpd = 0.0
 
-    for _, (samples, labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for samples, labels in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
         loss = 0.0
         # Average multiple forward passes for a stable NLL estimate.
         for _ in range(N):
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device.type):
                 with torch.no_grad():
                     one_loss = model(samples, labels)
                     loss += one_loss
+                    
         loss /= N
         loss_value = loss.item()
 
-        # convert loss to bits/dim
+        # Convert loss to bits/dim
         bpd_value = loss_value / math.log(2)
         total_samples += samples.size(0)
         total_bpd += bpd_value * samples.size(0)
@@ -102,6 +107,7 @@ def compute_nll(model: torch.nn.Module, data_loader: Iterable, device: torch.dev
 
 def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     model_without_ddp.eval()
+    
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()
     num_steps = args.num_images // (batch_size * world_size) + 1
@@ -117,6 +123,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     if args.evaluate_gen:
         save_folder += "_evaluate"
     print("Save to:", save_folder)
+    
     if misc.get_rank() == 0 and not os.path.exists(save_folder):
         os.makedirs(save_folder)
 
@@ -140,16 +147,19 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
         torch.cuda.synchronize()
         start_time = time.time()
 
-        # generation
+        # Generation
         with torch.no_grad():
-            with torch.cuda.amp.autocast():
+            # with torch.cuda.amp.autocast():
+            with torch.amp.autocast(model_without_ddp.device.type):
                 class_embedding = model_without_ddp.class_emb(labels_gen)
                 if not args.cfg == 1.0:
                     # Concatenate fake latent for classifier-free guidance.
                     class_embedding = torch.cat(
-                        [class_embedding, model_without_ddp.fake_latent.repeat(batch_size, 1)],
+                        [class_embedding, 
+                         model_without_ddp.fake_latent.repeat(batch_size, 1)],
                         dim=0
                     )
+                    
                 sampled_images = model_without_ddp.sample(
                     cond_list=[class_embedding for _ in range(args.num_conds)],
                     num_iter_list=[int(num_iter) for num_iter in args.num_iter_list.split(",")],
@@ -175,11 +185,12 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
         sampled_images = sampled_images * pix_std + pix_mean
         sampled_images = sampled_images.detach().cpu()
 
-        # distributed save images
+        # Distributed save images
         for b_id in range(sampled_images.size(0)):
             img_id = i * sampled_images.size(0) * world_size + local_rank * sampled_images.size(0) + b_id
             if img_id >= args.num_images:
                 break
+            
             gen_img = np.round(np.clip(sampled_images[b_id].numpy().transpose([1, 2, 0]) * 255, 0, 255))
             gen_img = gen_img.astype(np.uint8)[:, :, ::-1]
             cv2.imwrite(os.path.join(save_folder, '{}.png'.format(str(img_id).zfill(5))), gen_img)
@@ -187,7 +198,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     torch.distributed.barrier()
     time.sleep(10)
 
-    # compute FID and IS
+    # Compute FID and IS
     if log_writer is not None:
         if args.img_size == 64:
             fid_statistics_file = 'fid_stats/adm_in64_stats.npz'
@@ -195,6 +206,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
             fid_statistics_file = 'fid_stats/adm_in256_stats.npz'
         else:
             raise NotImplementedError
+        
         metrics_dict = torch_fidelity.calculate_metrics(
             input1=save_folder,
             input2=None,
@@ -208,12 +220,14 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
         )
         fid = metrics_dict['frechet_inception_distance']
         inception_score = metrics_dict['inception_score_mean']
+        
         postfix = "_cfg{}".format(args.cfg)
         log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
         log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+        
         if not args.evaluate_gen:
-            # remove temporal saving folder for online eval
+            # Remove temporal saving folder for online eval
             shutil.rmtree(save_folder)
 
     torch.distributed.barrier()

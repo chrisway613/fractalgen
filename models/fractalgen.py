@@ -40,6 +40,7 @@ class FractalGen(nn.Module):
             self.class_emb = nn.Embedding(class_num, embed_dim_list[0])
             self.label_drop_prob = label_drop_prob
             self.fake_latent = nn.Parameter(torch.zeros(1, embed_dim_list[0]))
+
             torch.nn.init.normal_(self.class_emb.weight, std=0.02)
             torch.nn.init.normal_(self.fake_latent, std=0.02)
 
@@ -51,10 +52,13 @@ class FractalGen(nn.Module):
             generator = MAR
         else:
             raise NotImplementedError
+
         self.generator = generator(
-            seq_len=(img_size_list[fractal_level] // img_size_list[fractal_level+1]) ** 2,
-            patch_size=img_size_list[fractal_level+1],
-            cond_embed_dim=embed_dim_list[fractal_level-1] if fractal_level > 0 else embed_dim_list[0],
+            seq_len=(img_size_list[fractal_level] //
+                     img_size_list[fractal_level + 1]) ** 2,
+            patch_size=img_size_list[fractal_level + 1],
+            cond_embed_dim=embed_dim_list[fractal_level -
+                                          1] if fractal_level > 0 else embed_dim_list[0],
             embed_dim=embed_dim_list[fractal_level],
             num_blocks=num_blocks_list[fractal_level],
             num_heads=num_heads_list[fractal_level],
@@ -82,15 +86,15 @@ class FractalGen(nn.Module):
                 num_conds=num_conds,
                 r_weight=r_weight,
                 grad_checkpointing=grad_checkpointing,
-                fractal_level=fractal_level+1
+                fractal_level=fractal_level + 1
             )
         else:
             # The final fractal level uses PixelLoss.
             self.next_fractal = PixelLoss(
                 c_channels=embed_dim_list[fractal_level],
-                depth=num_blocks_list[fractal_level+1],
-                width=embed_dim_list[fractal_level+1],
-                num_heads=num_heads_list[fractal_level+1],
+                depth=num_blocks_list[fractal_level + 1],
+                width=embed_dim_list[fractal_level + 1],
+                num_heads=num_heads_list[fractal_level + 1],
                 r_weight=r_weight,
             )
 
@@ -98,30 +102,43 @@ class FractalGen(nn.Module):
         """
         Forward pass to get loss recursively.
         """
+
         if self.fractal_level == 0:
             # Compute class embedding conditions.
             class_embedding = self.class_emb(cond_list)
+
             if self.training:
                 # Randomly drop labels according to label_drop_prob.
-                drop_latent_mask = (torch.rand(cond_list.size(0)) < self.label_drop_prob).unsqueeze(-1).cuda().to(class_embedding.dtype)
-                class_embedding = drop_latent_mask * self.fake_latent + (1 - drop_latent_mask) * class_embedding
+                drop_latent_mask = (torch.rand(cond_list.size(
+                    0)) < self.label_drop_prob).unsqueeze(-1).cuda().to(class_embedding.dtype)
+                # class_embedding = drop_latent_mask * self.fake_latent + \
+                #     (1 - drop_latent_mask) * class_embedding
             else:
                 # For evaluation (unconditional NLL), use a constant mask.
-                drop_latent_mask = torch.ones(cond_list.size(0)).unsqueeze(-1).cuda().to(class_embedding.dtype)
-                class_embedding = drop_latent_mask * self.fake_latent + (1 - drop_latent_mask) * class_embedding
+                drop_latent_mask = torch.ones(cond_list.size(
+                    0)).unsqueeze(-1).cuda().to(class_embedding.dtype)
+                
+            class_embedding = drop_latent_mask * self.fake_latent + \
+                (1 - drop_latent_mask) * class_embedding
             cond_list = [class_embedding for _ in range(5)]
 
         # Get image patches and conditions for the next level
         imgs, cond_list, guiding_pixel_loss = self.generator(imgs, cond_list)
         # Compute loss recursively from the next fractal level.
         loss = self.next_fractal(imgs, cond_list)
+
         return loss + guiding_pixel_loss
 
-    def sample(self, cond_list, num_iter_list, cfg, cfg_schedule, temperature, filter_threshold, fractal_level,
-               visualize=False):
+    def sample(
+        self, cond_list, num_iter_list,
+        cfg, cfg_schedule, temperature,
+        filter_threshold, fractal_level,
+        visualize=False
+    ):
         """
         Generate samples recursively.
         """
+
         if fractal_level < self.num_fractal_levels - 2:
             next_level_sample_function = partial(
                 self.next_fractal.sample,

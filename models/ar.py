@@ -496,4 +496,5 @@ class AR(nn.Module):
         for b in self.blocks:
             b.attention.kv_cache = None
         patches = self.unpatchify(patches)
+        
         return patches

@@ -265,8 +265,11 @@ class MAR(nn.Module):
 
         return patches, cond_list_next, guiding_pixel_loss
 
-    def sample(self, cond_list, num_iter, cfg, cfg_schedule, temperature, filter_threshold, next_level_sample_function,
-               visualize=False):
+    def sample(
+        self, cond_list, num_iter, cfg, cfg_schedule, 
+        temperature, filter_threshold, next_level_sample_function,
+        visualize=False
+    ):
         """ generation """
         if cfg == 1.0:
             bsz = cond_list[0].size(0)
