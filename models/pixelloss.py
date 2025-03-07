@@ -1,9 +1,9 @@
-from functools import partial
-
 import math
+
 import torch
 import torch.nn as nn
 
+from functools import partial
 from timm.models.vision_transformer import DropPath, Mlp
 
 
@@ -87,10 +87,12 @@ class CausalBlock(nn.Module):
         self.attn = CausalAttention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=proj_drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=proj_drop)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,
+                       act_layer=act_layer, drop=proj_drop)
 
     def forward(self, x):
         x = x + self.drop_path(self.attn(self.norm1(x)))
@@ -102,12 +104,14 @@ class MlmLayer(nn.Module):
 
     def __init__(self, vocab_size):
         super().__init__()
+
         self.bias = nn.Parameter(torch.zeros(1, vocab_size))
 
     def forward(self, x, word_embeddings):
         word_embeddings = word_embeddings.transpose(0, 1)
         logits = torch.matmul(x, word_embeddings)
         logits = logits + self.bias
+
         return logits
 
 
@@ -119,6 +123,7 @@ class PixelLoss(nn.Module):
         self.pix_std = torch.Tensor([0.229, 0.224, 0.225])
 
         self.cond_proj = nn.Linear(c_channels, width)
+
         self.r_codebook = nn.Embedding(256, width)
         self.g_codebook = nn.Embedding(256, width)
         self.b_codebook = nn.Embedding(256, width)
@@ -142,19 +147,19 @@ class PixelLoss(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
-        # parameters
+        # Parameters
         torch.nn.init.normal_(self.r_codebook.weight, std=.02)
         torch.nn.init.normal_(self.g_codebook.weight, std=.02)
         torch.nn.init.normal_(self.b_codebook.weight, std=.02)
 
-        # initialize nn.Linear and nn.LayerNorm
+        # Initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # we use xavier_uniform following official JAX ViT:
+            # We use xavier_uniform following official JAX ViT:
             torch.nn.init.xavier_uniform_(m.weight)
-            if isinstance(m, nn.Linear) and m.bias is not None:
+            if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             if m.bias is not None:
@@ -164,17 +169,22 @@ class PixelLoss(nn.Module):
 
     def predict(self, target, cond_list):
         target = target.reshape(target.size(0), target.size(1))
-        # back to [0, 255]
+
+        # Back to [0, 255]
         mean = self.pix_mean.cuda().unsqueeze(0)
         std = self.pix_std.cuda().unsqueeze(0)
-        target = target * std + mean
-        # add a very small noice to avoid pixel distribution inconsistency caused by banker's rounding
-        target = (target * 255 + 1e-2 * torch.randn_like(target)).round().long()
 
-        # take only the middle condition
+        target = target * std + mean
+        # Add a very small noise to avoid pixel distribution inconsistency caused by banker's rounding
+        target = (target * 255 + 1e-2 *
+                  torch.randn_like(target)).round().long()
+
+        # Take only the middle condition
         cond = cond_list[0]
         x = torch.cat(
-            [self.cond_proj(cond).unsqueeze(1), self.r_codebook(target[:, 0:1]), self.g_codebook(target[:, 1:2]),
+            [self.cond_proj(cond).unsqueeze(1),
+             self.r_codebook(target[:, 0:1]),
+             self.g_codebook(target[:, 1:2]),
              self.b_codebook(target[:, 2:3])], dim=1)
         x = self.ln(x)
 
@@ -182,23 +192,28 @@ class PixelLoss(nn.Module):
             x = block(x)
 
         x = self.norm(x)
-        with torch.cuda.amp.autocast(enabled=False):
+        # with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast(enabled=False):
             r_logits = self.r_mlm(x[:, 0], self.r_codebook.weight)
             g_logits = self.g_mlm(x[:, 1], self.g_codebook.weight)
             b_logits = self.b_mlm(x[:, 2], self.b_codebook.weight)
 
-        logits = torch.cat([r_logits.unsqueeze(1), g_logits.unsqueeze(1), b_logits.unsqueeze(1)], dim=1)
+        logits = torch.cat(
+            [r_logits.unsqueeze(1), g_logits.unsqueeze(1), b_logits.unsqueeze(1)], dim=1)
         return logits, target
 
     def forward(self, target, cond_list):
-        """ training """
+        """ Training """
+
         logits, target = self.predict(target, cond_list)
+
         loss_r = self.criterion(logits[:, 0], target[:, 0])
         loss_g = self.criterion(logits[:, 1], target[:, 1])
         loss_b = self.criterion(logits[:, 2], target[:, 2])
 
         if self.training:
-            loss = (self.r_weight * loss_r + loss_g + loss_b) / (self.r_weight + 2)
+            loss = (self.r_weight * loss_r + loss_g +
+                    loss_b) / (self.r_weight + 2)
         else:
             # for NLL computation
             loss = (loss_r + loss_g + loss_b) / 3
@@ -206,7 +221,8 @@ class PixelLoss(nn.Module):
         return loss.mean()
 
     def sample(self, cond_list, temperature, cfg, filter_threshold=0):
-        """ generation """
+        """ Generation """
+
         if cfg == 1.0:
             bsz = cond_list[0].size(0)
         else:
@@ -217,7 +233,8 @@ class PixelLoss(nn.Module):
             if cfg == 1.0:
                 logits, _ = self.predict(pixel_values, cond_list)
             else:
-                logits, _ = self.predict(torch.cat([pixel_values, pixel_values], dim=0), cond_list)
+                logits, _ = self.predict(
+                    torch.cat([pixel_values, pixel_values], dim=0), cond_list)
             logits = logits[:, i]
             logits = logits * temperature
 
@@ -230,7 +247,8 @@ class PixelLoss(nn.Module):
                 mask = cond_probs < filter_threshold
                 uncond_logits[mask] = torch.max(
                     uncond_logits,
-                    cond_logits - torch.max(cond_logits, dim=-1, keepdim=True)[0] + torch.max(uncond_logits, dim=-1, keepdim=True)[0]
+                    cond_logits - torch.max(cond_logits, dim=-1, keepdim=True)[
+                        0] + torch.max(uncond_logits, dim=-1, keepdim=True)[0]
                 )[mask]
 
                 logits = uncond_logits + cfg * (cond_logits - uncond_logits)
@@ -238,7 +256,8 @@ class PixelLoss(nn.Module):
             # get token prediction
             probs = torch.softmax(logits, dim=-1)
             sampled_ids = torch.multinomial(probs, num_samples=1).reshape(-1)
-            pixel_values[:, i] = (sampled_ids.float() / 255 - self.pix_mean[i]) / self.pix_std[i]
+            pixel_values[:, i] = (sampled_ids.float() /
+                                  255 - self.pix_mean[i]) / self.pix_std[i]
 
         # back to [0, 1]
         return pixel_values

@@ -1,15 +1,17 @@
-from functools import partial
-
 import math
 import numpy as np
 import scipy.stats as stats
+
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
-from util.visualize import visualize_patch
 
+from functools import partial
+
+from torch.utils.checkpoint import checkpoint
 from timm.models.vision_transformer import DropPath, Mlp
+
 from models.pixelloss import PixelLoss
+from util.visualize import visualize_patch
 
 
 def mask_by_order(mask_len, order, bsz, seq_len):
@@ -84,18 +86,21 @@ class MAR(nn.Module):
         self.grad_checkpointing = grad_checkpointing
 
         # --------------------------------------------------------------------------
-        # variant masking ratio
+        # Variant masking ratio
+        # The mask ratio is sampled from a truncated normal distribution with mean 1.0 and std 0.25.
+        # [loc + scale * -4, loc + scale * 0]
         self.mask_ratio_generator = stats.truncnorm(-4, 0, loc=1.0, scale=0.25)
 
         # --------------------------------------------------------------------------
-        # network
+        # Network
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.patch_emb = nn.Linear(3 * patch_size ** 2, embed_dim, bias=True)
         self.patch_emb_ln = nn.LayerNorm(embed_dim, eps=1e-6)
         self.cond_emb = nn.Linear(cond_embed_dim, embed_dim, bias=True)
         if self.guiding_pixel:
             self.pix_proj = nn.Linear(3, embed_dim, bias=True)
-        self.pos_embed_learned = nn.Parameter(torch.zeros(1, seq_len+num_conds+self.guiding_pixel, embed_dim))
+            
+        self.pos_embed_learned = nn.Parameter(torch.zeros(1, seq_len + num_conds + self.guiding_pixel, embed_dim))
 
         self.blocks = nn.ModuleList([
             Block(embed_dim, num_heads, mlp_ratio=4.,
@@ -117,7 +122,7 @@ class MAR(nn.Module):
             )
 
     def initialize_weights(self):
-        # parameters
+        # Parameters
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.pos_embed_learned, std=.02)
 
@@ -126,9 +131,10 @@ class MAR(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # we use xavier_uniform following official JAX ViT:
+            # We use xavier_uniform following official JAX ViT:
             torch.nn.init.xavier_uniform_(m.weight)
-            if isinstance(m, nn.Linear) and m.bias is not None:
+            # if isinstance(m, nn.Linear) and m.bias is not None:
+            if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             if m.bias is not None:
@@ -144,6 +150,7 @@ class MAR(nn.Module):
         x = x.reshape(bsz, c, h_, p, w_, p)
         x = torch.einsum('nchpwq->nhwcpq', x)
         x = x.reshape(bsz, h_ * w_, c * p ** 2)
+        
         return x  # [n, l, d]
 
     def unpatchify(self, x):
@@ -162,19 +169,29 @@ class MAR(nn.Module):
 
     def random_masking_uniform(self, x, orders):
         bsz, seq_len, embed_dim = x.shape
+        
         num_masked_tokens = np.random.randint(seq_len) + 1
         mask = torch.zeros(bsz, seq_len, device=x.device)
         mask = torch.scatter(mask, dim=-1, index=orders[:, :num_masked_tokens],
                              src=torch.ones(bsz, seq_len, device=x.device))
+        
         return mask
 
     def random_masking(self, x, orders):
         bsz, seq_len, embed_dim = x.shape
+        
+        # 从截断的正态分布中采样出每个样本的 mask 比例
+        # (b,)
         mask_rates = self.mask_ratio_generator.rvs(bsz)
+        # 计算每个样本被 mask 掉的 token 数量
+        # (b,)
         num_masked_tokens = torch.Tensor(np.ceil(seq_len * mask_rates)).cuda()
+        # (b, seq_len)
         expanded_indices = torch.arange(seq_len, device=x.device).expand(bsz, seq_len)
+        # (b, seq_len)
         sorted_orders = torch.argsort(orders, dim=-1)
         mask = (expanded_indices < num_masked_tokens[:, None]).float()
+        # 按照采样顺序将每个 token 的 mask 设置到对应顺序中
         mask = torch.scatter(torch.zeros_like(mask), dim=-1, index=sorted_orders, src=mask)
 
         return mask
@@ -182,36 +199,42 @@ class MAR(nn.Module):
     def predict(self, x, mask, cond_list):
         x = self.patch_emb(x)
 
-        # prepend conditions from prev generator
+        # Prepend conditions from prev generator
         for i in range(self.num_conds):
             x = torch.cat([self.cond_emb(cond_list[i]).unsqueeze(1), x], dim=1)
 
-        # prepend guiding pixel
+        # Prepend guiding pixel
         if self.guiding_pixel:
             x = torch.cat([self.pix_proj(cond_list[-1]).unsqueeze(1), x], dim=1)
 
-        # masking
-        mask_with_cond = torch.cat([torch.zeros(x.size(0), self.num_conds+self.guiding_pixel, device=x.device), mask], dim=1).bool()
+        # Masking
+        mask_with_cond = torch.cat(
+            [torch.zeros(x.size(0), self.num_conds + self.guiding_pixel, device=x.device), mask], 
+            dim=1
+        ).bool()
         x = torch.where(mask_with_cond.unsqueeze(-1), self.mask_token.to(x.dtype), x)
 
-        # position embedding
+        # Position embedding
         x = x + self.pos_embed_learned
         x = self.patch_emb_ln(x)
 
-        # apply Transformer blocks
+        # Apply Transformer blocks
         if self.grad_checkpointing and not torch.jit.is_scripting() and self.training:
             for block in self.blocks:
                 x = checkpoint(block, x)
         else:
             for block in self.blocks:
                 x = block(x)
+                
         x = self.norm(x)
 
-        # return 5 conditions: middle, top, right, bottom, left
-        middle_cond = x[:, self.num_conds+self.guiding_pixel:]
+        # Return 5 conditions: middle, top, right, bottom, left
+        middle_cond = x[:, self.num_conds + self.guiding_pixel:]
         bsz, seq_len, c = middle_cond.size()
+        
         h = int(np.sqrt(seq_len))
         w = int(np.sqrt(seq_len))
+        
         top_cond = middle_cond.reshape(bsz, h, w, c)
         top_cond = torch.cat([torch.zeros(bsz, 1, w, c, device=top_cond.device), top_cond[:, :-1]], dim=1)
         top_cond = top_cond.reshape(bsz, seq_len, c)
@@ -231,19 +254,23 @@ class MAR(nn.Module):
         return [middle_cond, top_cond, right_cond, bottom_cond, left_cond]
 
     def forward(self, imgs, cond_list):
-        """ training """
-        # patchify to get gt
+        """ Training """
+        
+        # Patchify to get gt
+        # (b, seq_len = (h // p) * (w // p), c * p ** 2)
         patches = self.patchify(imgs)
 
-        # mask tokens
+        # Mask tokens
+        # 对每个样本在序列维度上均匀采样顺序
+        # (b, seq_len)
         orders = self.sample_orders(bsz=patches.size(0))
         if self.training:
             mask = self.random_masking(patches, orders)
         else:
-            # uniform random masking for NLL computation
+            # Uniform random masking for NLL computation
             mask = self.random_masking_uniform(patches, orders)
 
-        # guiding pixel
+        # Guiding pixel
         if self.guiding_pixel:
             guiding_pixels = imgs.mean(-1).mean(-1)
             guiding_pixel_loss = self.guiding_pixel_loss(guiding_pixels, cond_list)
@@ -251,10 +278,10 @@ class MAR(nn.Module):
         else:
             guiding_pixel_loss = torch.Tensor([0]).cuda().mean()
 
-        # get condition for next level
+        # Get condition for next level
         cond_list_next = self.predict(patches, mask, cond_list)
 
-        # only keep those conditions and patches on mask
+        # Only keep those conditions and patches on mask
         for cond_idx in range(len(cond_list_next)):
             cond_list_next[cond_idx] = cond_list_next[cond_idx].reshape(cond_list_next[cond_idx].size(0) * cond_list_next[cond_idx].size(1), -1)
             cond_list_next[cond_idx] = cond_list_next[cond_idx][mask.reshape(-1).bool()]
@@ -270,7 +297,8 @@ class MAR(nn.Module):
         temperature, filter_threshold, next_level_sample_function,
         visualize=False
     ):
-        """ generation """
+        """ Generation """
+        
         if cfg == 1.0:
             bsz = cond_list[0].size(0)
         else:
