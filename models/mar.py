@@ -16,7 +16,12 @@ from util.visualize import visualize_patch
 
 def mask_by_order(mask_len, order, bsz, seq_len):
     masking = torch.zeros(bsz, seq_len).cuda()
-    masking = torch.scatter(masking, dim=-1, index=order[:, :mask_len.long()], src=torch.ones(bsz, seq_len).cuda()).bool()
+    masking = torch.scatter(
+        masking, dim=-1, 
+        index=order[:, :mask_len.long()],
+        src=torch.ones(bsz, seq_len).cuda()
+    ).bool()
+    
     return masking
 
 
@@ -186,10 +191,12 @@ class MAR(nn.Module):
         # 计算每个样本被 mask 掉的 token 数量
         # (b,)
         num_masked_tokens = torch.Tensor(np.ceil(seq_len * mask_rates)).cuda()
+        
         # (b, seq_len)
         expanded_indices = torch.arange(seq_len, device=x.device).expand(bsz, seq_len)
         # (b, seq_len)
         sorted_orders = torch.argsort(orders, dim=-1)
+        
         mask = (expanded_indices < num_masked_tokens[:, None]).float()
         # 按照采样顺序将每个 token 的 mask 设置到对应顺序中
         mask = torch.scatter(torch.zeros_like(mask), dim=-1, index=sorted_orders, src=mask)
@@ -304,57 +311,64 @@ class MAR(nn.Module):
         else:
             bsz = cond_list[0].size(0) // 2
 
-        # sample the guiding pixel
+        # Sample the guiding pixel
         if self.guiding_pixel:
             sampled_pixels = self.guiding_pixel_loss.sample(cond_list, temperature, cfg, filter_threshold)
             if not cfg == 1.0:
                 sampled_pixels = torch.cat([sampled_pixels, sampled_pixels], dim=0)
+                
             cond_list.append(sampled_pixels)
 
-        # init token mask
+        # Init token mask
         mask = torch.ones(bsz, self.seq_len).cuda()
         patches = torch.zeros(bsz, self.seq_len, 3 * self.patch_size**2).cuda()
         orders = self.sample_orders(bsz)
         num_iter = min(self.seq_len, num_iter)
 
-        # sample image
+        # Sample image
         for step in range(num_iter):
             cur_patches = patches.clone()
-
             if not cfg == 1.0:
                 patches = torch.cat([patches, patches], dim=0)
                 mask = torch.cat([mask, mask], dim=0)
 
-            # get next level conditions
+            # Get next level conditions
             cond_list_next = self.predict(patches, mask, cond_list)
 
-            # mask ratio for the next round, following MAR.
+            # Mask ratio for the next round, following MAR.
+            # 1.0(excluded) -> 0.0
             mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
             mask_len = torch.Tensor([np.floor(self.seq_len * mask_ratio)]).cuda()
-
-            # masks out at least one for the next iteration
+            
+            # Masks out at least one for the next iteration
+            # Mask 长度逐渐减少, 但至少要有一个 token 被 mask 掉
+            # (1,)
             mask_len = torch.maximum(torch.Tensor([1]).cuda(),
                                      torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
 
-            # get masking for next iteration and locations to be predicted in this iteration
+            # Get masking for next iteration and locations to be predicted in this iteration
             mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
             if step >= num_iter - 1:
                 mask_to_pred = mask[:bsz].bool()
             else:
+                # 本轮被 mask 的但下轮没有被 mask 的位置即为需要预测的位置
+                # 由于 `orders` 即采样顺序在采样开始前就已经确定，因此不会出现某个 unmasked 位置在下一轮被重新 mask 的情况
                 mask_to_pred = torch.logical_xor(mask[:bsz].bool(), mask_next.bool())
+                
             mask = mask_next
             if not cfg == 1.0:
                 mask_to_pred = torch.cat([mask_to_pred, mask_to_pred], dim=0)
 
-            # sample token latents for this step
+            # Sample token latents for this step
             for cond_idx in range(len(cond_list_next)):
                 cond_list_next[cond_idx] = cond_list_next[cond_idx][mask_to_pred.nonzero(as_tuple=True)]
 
-            # cfg schedule
+            # Cfg schedule
             if cfg_schedule == "linear":
                 cfg_iter = 1 + (cfg - 1) * (self.seq_len - mask_len[0]) / self.seq_len
             else:
                 cfg_iter = cfg
+                
             sampled_patches = next_level_sample_function(cond_list=cond_list_next, cfg=cfg_iter,
                                                          temperature=temperature, filter_threshold=filter_threshold)
             sampled_patches = sampled_patches.reshape(sampled_patches.size(0), -1)
@@ -365,7 +379,7 @@ class MAR(nn.Module):
             cur_patches[mask_to_pred.nonzero(as_tuple=True)] = sampled_patches.to(cur_patches.dtype)
             patches = cur_patches.clone()
 
-            # visualize generation process for colab
+            # Visualize generation process for colab
             if visualize:
                 visualize_patch(self.unpatchify(patches))
 

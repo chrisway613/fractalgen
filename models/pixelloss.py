@@ -200,6 +200,7 @@ class PixelLoss(nn.Module):
 
         logits = torch.cat(
             [r_logits.unsqueeze(1), g_logits.unsqueeze(1), b_logits.unsqueeze(1)], dim=1)
+        
         return logits, target
 
     def forward(self, target, cond_list):
@@ -227,6 +228,7 @@ class PixelLoss(nn.Module):
             bsz = cond_list[0].size(0)
         else:
             bsz = cond_list[0].size(0) // 2
+            
         pixel_values = torch.zeros(bsz, 3).cuda()
 
         for i in range(3):
@@ -234,7 +236,11 @@ class PixelLoss(nn.Module):
                 logits, _ = self.predict(pixel_values, cond_list)
             else:
                 logits, _ = self.predict(
-                    torch.cat([pixel_values, pixel_values], dim=0), cond_list)
+                    torch.cat([pixel_values, pixel_values], dim=0), 
+                    cond_list
+                )
+            
+            # (n, 256)
             logits = logits[:, i]
             logits = logits * temperature
 
@@ -242,22 +248,25 @@ class PixelLoss(nn.Module):
                 cond_logits = logits[:bsz]
                 uncond_logits = logits[bsz:]
 
-                # very unlikely conditional logits will be suppressed
+                # Very unlikely conditional logits will be suppressed
                 cond_probs = torch.softmax(cond_logits, dim=-1)
                 mask = cond_probs < filter_threshold
+                # 对于低概率区域, 将无条件 logits 设为其与条件 logits 之中的较大者,
+                # 从而抑制采样结果向这种低概率方向偏移.
+                # 以下计算过程中, 将 `cond_logits` 做了 shift, 使其尺度范围与 `uncond_logits` 对齐.
                 uncond_logits[mask] = torch.max(
                     uncond_logits,
-                    cond_logits - torch.max(cond_logits, dim=-1, keepdim=True)[
-                        0] + torch.max(uncond_logits, dim=-1, keepdim=True)[0]
+                    cond_logits - torch.max(cond_logits, dim=-1, keepdim=True)[0] \
+                        + torch.max(uncond_logits, dim=-1, keepdim=True)[0]
                 )[mask]
 
                 logits = uncond_logits + cfg * (cond_logits - uncond_logits)
 
-            # get token prediction
+            # Get token prediction
             probs = torch.softmax(logits, dim=-1)
             sampled_ids = torch.multinomial(probs, num_samples=1).reshape(-1)
             pixel_values[:, i] = (sampled_ids.float() /
                                   255 - self.pix_mean[i]) / self.pix_std[i]
 
-        # back to [0, 1]
+        # Back to [0, 1]
         return pixel_values

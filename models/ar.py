@@ -1,5 +1,6 @@
 # Modified from:
 #   LlamaGen:    https://github.com/FoundationVision/LlamaGen/blob/main/autoregressive/models/gpt.py
+
 from dataclasses import dataclass
 from typing import Optional
 

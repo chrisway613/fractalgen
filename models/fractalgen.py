@@ -111,8 +111,6 @@ class FractalGen(nn.Module):
                 # Randomly drop labels according to label_drop_prob.
                 drop_latent_mask = (torch.rand(cond_list.size(
                     0)) < self.label_drop_prob).unsqueeze(-1).cuda().to(class_embedding.dtype)
-                # class_embedding = drop_latent_mask * self.fake_latent + \
-                #     (1 - drop_latent_mask) * class_embedding
             else:
                 # For evaluation (unconditional NLL), use a constant mask.
                 drop_latent_mask = torch.ones(cond_list.size(
