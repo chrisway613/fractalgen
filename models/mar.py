@@ -166,6 +166,7 @@ class MAR(nn.Module):
         x = x.reshape(bsz, h_, w_, 3, p, p)
         x = torch.einsum('nhwcpq->nchpwq', x)
         x = x.reshape(bsz, 3, h_ * p, w_ * p)
+        
         return x  # [n, 3, h, w]
 
     def sample_orders(self, bsz):
@@ -290,7 +291,10 @@ class MAR(nn.Module):
 
         # Only keep those conditions and patches on mask
         for cond_idx in range(len(cond_list_next)):
-            cond_list_next[cond_idx] = cond_list_next[cond_idx].reshape(cond_list_next[cond_idx].size(0) * cond_list_next[cond_idx].size(1), -1)
+            cond_list_next[cond_idx] = cond_list_next[cond_idx].reshape(
+                cond_list_next[cond_idx].size(0) * \
+                    cond_list_next[cond_idx].size(1), -1
+            )
             cond_list_next[cond_idx] = cond_list_next[cond_idx][mask.reshape(-1).bool()]
 
         patches = patches.reshape(patches.size(0) * patches.size(1), -1)

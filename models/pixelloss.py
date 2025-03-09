@@ -9,10 +9,13 @@ from timm.models.vision_transformer import DropPath, Mlp
 
 def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None) -> torch.Tensor:
     L, S = query.size(-2), key.size(-2)
+    
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
     attn_bias = torch.zeros(L, S, dtype=query.dtype).cuda()
+    
     if is_causal:
         assert attn_mask is None
+        
         temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0).cuda()
         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
         attn_bias.to(query.dtype)
@@ -22,11 +25,15 @@ def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.
             attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
         else:
             attn_bias += attn_mask
-    with torch.cuda.amp.autocast(enabled=False):
+            
+    # with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast(enabled=False):
         attn_weight = query @ key.transpose(-2, -1) * scale_factor
+        
     attn_weight += attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
     attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+    
     return attn_weight @ value
 
 
@@ -42,7 +49,9 @@ class CausalAttention(nn.Module):
             norm_layer: nn.Module = nn.LayerNorm
     ) -> None:
         super().__init__()
+        
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
+        
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
@@ -56,6 +65,7 @@ class CausalAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
+        
         qkv = (
             self.qkv(x)
             .reshape(B, N, 3, self.num_heads, self.head_dim)
@@ -71,24 +81,31 @@ class CausalAttention(nn.Module):
             dropout_p=self.attn_drop.p if self.training else 0.0,
             is_causal=True
         )
-
         x = x.transpose(1, 2).reshape(B, N, C)
+        
         x = self.proj(x)
         x = self.proj_drop(x)
+        
         return x
 
 
 class CausalBlock(nn.Module):
-
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, proj_drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
+        
         self.norm1 = norm_layer(dim)
         self.attn = CausalAttention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=proj_drop)
+            dim, 
+            num_heads=num_heads, 
+            qkv_bias=qkv_bias, 
+            attn_drop=attn_drop, 
+            proj_drop=proj_drop
+        )
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.drop_path = DropPath(
-            drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0. \
+            else nn.Identity()
+            
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,
@@ -97,11 +114,11 @@ class CausalBlock(nn.Module):
     def forward(self, x):
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+        
         return x
 
 
 class MlmLayer(nn.Module):
-
     def __init__(self, vocab_size):
         super().__init__()
 
@@ -168,6 +185,7 @@ class PixelLoss(nn.Module):
                 nn.init.constant_(m.weight, 1.0)
 
     def predict(self, target, cond_list):
+        # (n, 3, 1, 1) -> (n, 3)
         target = target.reshape(target.size(0), target.size(1))
 
         # Back to [0, 255]
@@ -206,6 +224,7 @@ class PixelLoss(nn.Module):
     def forward(self, target, cond_list):
         """ Training """
 
+        # (n, 3, 256); (n, 3)
         logits, target = self.predict(target, cond_list)
 
         loss_r = self.criterion(logits[:, 0], target[:, 0])
